@@ -5,38 +5,19 @@
 # Uso: sudo ./instalar_seederlinux.sh
 # =============================================================================
 
-set -e  # Interrompe o script em caso de erro
+set -e
 
-# Cores
 VERDE='\033[0;32m'
 AMARELO='\033[1;33m'
 AZUL='\033[0;34m'
 VERMELHO='\033[0;31m'
 SEM_COR='\033[0m'
 
-# -----------------------------------------------------------------------------
-# Funções auxiliares
-# -----------------------------------------------------------------------------
-log_info() {
-    echo -e "${AZUL}➜${SEM_COR} $1"
-}
+log_info() { echo -e "${AZUL}➜${SEM_COR} $1"; }
+log_ok()   { echo -e "${VERDE}✓${SEM_COR} $1"; }
+log_warn() { echo -e "${AMARELO}⚠${SEM_COR} $1"; }
+log_error(){ echo -e "${VERMELHO}✗${SEM_COR} $1"; exit 1; }
 
-log_ok() {
-    echo -e "${VERDE}✓${SEM_COR} $1"
-}
-
-log_warn() {
-    echo -e "${AMARELO}⚠${SEM_COR} $1"
-}
-
-log_error() {
-    echo -e "${VERMELHO}✗${SEM_COR} $1"
-    exit 1
-}
-
-# -----------------------------------------------------------------------------
-# Verificação de root
-# -----------------------------------------------------------------------------
 if [ "$EUID" -ne 0 ]; then
     log_error "Execute como root: sudo ./instalar_seederlinux.sh"
 fi
@@ -49,25 +30,19 @@ echo ""
 # -----------------------------------------------------------------------------
 # 1. Detectar sistema
 # -----------------------------------------------------------------------------
-log_info "[1/11] Detectando sistema operacional..."
-
+log_info "[1/12] Detectando sistema operacional..."
 if [ -f /etc/os-release ]; then
     . /etc/os-release
     DISTRO=$ID
-    VERSAO=$VERSION_ID
-    CODENAME=$VERSION_CODENAME
 else
     log_error "Não foi possível identificar a distribuição."
 fi
-
 echo "   Distribuição: $NAME $VERSION"
-echo "   Codename: $CODENAME"
 
 # -----------------------------------------------------------------------------
-# 2. Configurações padrão
+# 2. Configurações
 # -----------------------------------------------------------------------------
-log_info "[2/11] Definindo configurações..."
-
+log_info "[2/12] Definindo configurações..."
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WEB_DIR="/var/www/html/seederlinux"
 
@@ -84,10 +59,9 @@ echo "   Diretório web: $WEB_DIR"
 echo "   Banco: $DB_NAME / Usuário: $DB_USER"
 
 # -----------------------------------------------------------------------------
-# 3. Instalar dependências do sistema
+# 3. Instalar dependências
 # -----------------------------------------------------------------------------
-log_info "[3/11] Instalando dependências..."
-
+log_info "[3/12] Instalando dependências..."
 apt update -qq
 
 BASE_PKGS="apache2 postgresql postgresql-client curl git unzip openssl jq rsync"
@@ -121,28 +95,24 @@ esac
 
 a2enmod rewrite >/dev/null 2>&1 || true
 systemctl restart apache2
-
 log_ok "Dependências instaladas"
 
 # -----------------------------------------------------------------------------
 # 4. Iniciar PostgreSQL
 # -----------------------------------------------------------------------------
-log_info "[4/11] Iniciando PostgreSQL..."
-
+log_info "[4/12] Iniciando PostgreSQL..."
 systemctl start postgresql
 systemctl enable postgresql >/dev/null 2>&1
 sleep 2
-
 if ! systemctl is-active --quiet postgresql; then
-    log_error "PostgreSQL não iniciou. Verifique com: systemctl status postgresql"
+    log_error "PostgreSQL não iniciou."
 fi
 log_ok "PostgreSQL ativo"
 
 # -----------------------------------------------------------------------------
-# 5. Criar usuário e banco de dados
+# 5. Criar usuário e banco
 # -----------------------------------------------------------------------------
-log_info "[5/11] Criando usuário e banco de dados..."
-
+log_info "[5/12] Criando usuário e banco de dados..."
 if ! su - postgres -c "psql -tAc \"SELECT 1 FROM pg_roles WHERE rolname='$DB_USER'\"" 2>/dev/null | grep -q 1; then
     su - postgres -c "psql -c \"CREATE ROLE $DB_USER WITH LOGIN PASSWORD '$DB_PASS';\""
     log_ok "Usuário $DB_USER criado"
@@ -165,10 +135,8 @@ su - postgres -c "psql -d $DB_NAME -c \"ALTER DEFAULT PRIVILEGES IN SCHEMA publi
 # -----------------------------------------------------------------------------
 # 6. Configurar autenticação MD5
 # -----------------------------------------------------------------------------
-log_info "[6/11] Configurando autenticação MD5..."
-
+log_info "[6/12] Configurando autenticação MD5..."
 PG_HBA=$(su - postgres -c "psql -tAc 'SHOW hba_file;'" 2>/dev/null | tr -d ' ')
-
 if [ -n "$PG_HBA" ] && [ -f "$PG_HBA" ]; then
     cp "$PG_HBA" "${PG_HBA}.bak.$(date +%s)"
     sed -i 's/^local\s\+all\s\+all\s\+peer/local   all             all                                     md5/' "$PG_HBA"
@@ -178,56 +146,43 @@ if [ -n "$PG_HBA" ] && [ -f "$PG_HBA" ]; then
     sleep 2
     log_ok "Autenticação configurada para MD5"
 else
-    log_warn "Arquivo pg_hba.conf não encontrado. Verifique manualmente."
+    log_warn "pg_hba.conf não encontrado. Verifique manualmente."
 fi
 
 # -----------------------------------------------------------------------------
-# 7. Testar conexão com o banco
+# 7. Testar conexão
 # -----------------------------------------------------------------------------
-log_info "[7/11] Testando conexão com o banco..."
-
+log_info "[7/12] Testando conexão com o banco..."
 if PGPASSWORD="$DB_PASS" psql -h localhost -U "$DB_USER" -d "$DB_NAME" -c "SELECT 1" >/dev/null 2>&1; then
-    log_ok "Conexão ao banco bem-sucedida"
+    log_ok "Conexão bem-sucedida"
 else
-    log_error "Falha na conexão com o banco. Verifique as credenciais e a configuração do PostgreSQL."
+    log_error "Falha na conexão com o banco."
 fi
 
 # -----------------------------------------------------------------------------
-# 8. Copiar arquivos do projeto para o diretório web
+# 8. Copiar arquivos do projeto
 # -----------------------------------------------------------------------------
-log_info "[8/11] Copiando arquivos do projeto..."
-
+log_info "[8/12] Copiando arquivos do projeto..."
 if [ -d "$WEB_DIR" ]; then
     log_warn "Diretório $WEB_DIR já existe. Será sobrescrito (exceto storage)."
-    if [ -d "$WEB_DIR/storage" ]; then
-        mv "$WEB_DIR/storage" /tmp/seeder_storage_backup
-    fi
+    [ -d "$WEB_DIR/storage" ] && mv "$WEB_DIR/storage" /tmp/seeder_storage_backup
     rm -rf "$WEB_DIR"
 fi
-
 mkdir -p "$WEB_DIR"
 
-# Copia todos os arquivos, preservando a estrutura
 rsync -av --exclude='.git' --exclude='node_modules' --exclude='*.zip' \
     --exclude='install.sh' --exclude='instalar_seederlinux.sh' \
     "$SCRIPT_DIR/" "$WEB_DIR/" >/dev/null 2>&1
 
-if [ -d "/tmp/seeder_storage_backup" ]; then
-    mv /tmp/seeder_storage_backup "$WEB_DIR/storage"
-fi
-
+[ -d "/tmp/seeder_storage_backup" ] && mv /tmp/seeder_storage_backup "$WEB_DIR/storage"
 mkdir -p "$WEB_DIR/storage"
-
 log_ok "Arquivos copiados para $WEB_DIR"
 
 # -----------------------------------------------------------------------------
-# 9. Gerar config.php com as credenciais do banco
+# 9. Criar config.php
 # -----------------------------------------------------------------------------
-log_info "[9/11] Criando configuração do banco..."
-
-# CRIA O DIRETÓRIO api/ ANTES DE ESCREVER O ARQUIVO
+log_info "[9/12] Criando configuração do banco..."
 mkdir -p "$WEB_DIR/api"
-
 cat > "$WEB_DIR/api/config.php" <<PHPEOF
 <?php
 function getDBConnection() {
@@ -239,16 +194,11 @@ function getDBConnection() {
     
     try {
         \$dsn = "pgsql:host=\$host;port=\$port;dbname=\$dbname";
-        \$pdo = new PDO(
-            \$dsn,
-            \$user,
-            \$password,
-            [
-                PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-                PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-                PDO::ATTR_EMULATE_PREPARES => false
-            ]
-        );
+        \$pdo = new PDO(\$dsn, \$user, \$password, [
+            PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+            PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+            PDO::ATTR_EMULATE_PREPARES => false
+        ]);
         return \$pdo;
     } catch (PDOException \$e) {
         http_response_code(500);
@@ -257,20 +207,63 @@ function getDBConnection() {
     }
 }
 PHPEOF
-
-log_ok "config.php criado em $WEB_DIR/api/config.php"
+log_ok "config.php criado"
 
 # -----------------------------------------------------------------------------
-# 10. Executar schema.sql e criar usuário administrador
+# 10. Executar schema.sql e criar tabela users (se não existir)
 # -----------------------------------------------------------------------------
-log_info "[10/11] Executando schema do banco e criando administrador..."
+log_info "[10/12] Executando schema e criando tabelas..."
 
+# Aplica o schema principal
 if [ -f "$WEB_DIR/database/schema.sql" ]; then
     PGPASSWORD="$DB_PASS" psql -h localhost -U "$DB_USER" -d "$DB_NAME" -f "$WEB_DIR/database/schema.sql" >/dev/null 2>&1
     log_ok "Schema aplicado"
 else
     log_warn "schema.sql não encontrado em $WEB_DIR/database/"
 fi
+
+# Cria a tabela users se não existir
+log_info "   Verificando/criando tabela users..."
+PGPASSWORD="$DB_PASS" psql -h localhost -U "$DB_USER" -d "$DB_NAME" <<SQLEOF 2>/dev/null
+CREATE TABLE IF NOT EXISTS users (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(100) NOT NULL,
+    email VARCHAR(100) UNIQUE NOT NULL,
+    password_hash VARCHAR(255) NOT NULL,
+    role VARCHAR(50) DEFAULT 'user',
+    active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+SQLEOF
+log_ok "Tabela users verificada/criada"
+
+# -----------------------------------------------------------------------------
+# 11. Importar scripts core para o banco
+# -----------------------------------------------------------------------------
+log_info "[11/12] Importando scripts core para o banco..."
+
+if [ -d "$WEB_DIR/scripts" ]; then
+    for script_file in "$WEB_DIR/scripts"/*.sh; do
+        if [ -f "$script_file" ]; then
+            script_name=$(basename "$script_file" .sh)
+            script_content=$(cat "$script_file" | sed "s/'/''/g")  # escapa aspas simples
+            PGPASSWORD="$DB_PASS" psql -h localhost -U "$DB_USER" -d "$DB_NAME" <<SQLEOF 2>/dev/null
+INSERT INTO scripts (name, content, is_core, version)
+VALUES ('$script_name', '$script_content', TRUE, 1)
+ON CONFLICT (name) DO UPDATE 
+SET content = '$script_content', version = version + 1;
+SQLEOF
+            log_ok "   Script $script_name importado"
+        fi
+    done
+else
+    log_warn "Diretório scripts/ não encontrado em $WEB_DIR"
+fi
+
+# -----------------------------------------------------------------------------
+# 12. Criar usuário administrador
+# -----------------------------------------------------------------------------
+log_info "[12/12] Criando usuário administrador..."
 
 HASH=$(php -r "echo password_hash('$ADMIN_PASS', PASSWORD_BCRYPT);")
 
@@ -282,16 +275,15 @@ DO UPDATE SET password_hash = '$HASH', role = 'admin_gap', active = TRUE;
 SQLEOF
 
 if [ $? -eq 0 ]; then
-    log_ok "Usuário administrador criado/atualizado: $ADMIN_EMAIL"
+    log_ok "Administrador criado/atualizado: $ADMIN_EMAIL"
 else
-    log_warn "Não foi possível criar o administrador. Verifique se a tabela 'users' existe."
+    log_warn "Falha ao criar administrador. Verifique a tabela users."
 fi
 
 # -----------------------------------------------------------------------------
-# 11. Configurar Apache
+# 13. Configurar Apache
 # -----------------------------------------------------------------------------
-log_info "[11/11] Configurando Apache..."
-
+log_info "Configurando Apache..."
 cat > /etc/apache2/sites-available/seederlinux.conf <<APACHEEOF
 <VirtualHost *:80>
     ServerAdmin admin@localhost
@@ -317,34 +309,26 @@ APACHEEOF
 
 a2dissite 000-default.conf >/dev/null 2>&1 || true
 a2ensite seederlinux.conf >/dev/null 2>&1
-
 chown -R www-data:www-data "$WEB_DIR"
 chmod -R 755 "$WEB_DIR"
 chmod -R 775 "$WEB_DIR/storage"
-
 systemctl restart apache2
-
 log_ok "Apache configurado"
 
 # -----------------------------------------------------------------------------
-# Verificação final (teste da API)
+# Verificação final
 # -----------------------------------------------------------------------------
-log_info "Verificando a instalação..."
-
+log_info "Verificando instalação..."
 sleep 2
 API_RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost/api/organizations 2>/dev/null || echo "000")
-
 if [ "$API_RESPONSE" = "200" ] || [ "$API_RESPONSE" = "401" ] || [ "$API_RESPONSE" = "405" ]; then
     log_ok "API respondeu (HTTP $API_RESPONSE)"
 else
-    log_warn "A API não respondeu como esperado. Código: $API_RESPONSE"
+    log_warn "API não respondeu como esperado. Código: $API_RESPONSE"
 fi
 
-# -----------------------------------------------------------------------------
-# Resumo final
-# -----------------------------------------------------------------------------
+# Resumo
 IP=$(hostname -I | awk '{print $1}')
-
 echo ""
 echo -e "${VERDE}========================================${SEM_COR}"
 echo -e "${VERDE}  ✅ INSTALAÇÃO CONCLUÍDA!               ${SEM_COR}"
