@@ -1,83 +1,85 @@
 #!/bin/bash
 # =============================================================================
-# instalar_seederlinux.sh - Instalação Completa do SeederLinux Lite
+# install.sh - Instalação Completa do SeederLinux Lite (com HTTPS)
 # =============================================================================
-# Uso: sudo ./instalar_seederlinux.sh
+# Uso: sudo ./install.sh 02/07/2026
 # =============================================================================
 
-set -e
+set -e  # Interrompe em caso de erro
 
+# Cores
 VERDE='\033[0;32m'
 AMARELO='\033[1;33m'
 AZUL='\033[0;34m'
 VERMELHO='\033[0;31m'
 SEM_COR='\033[0m'
 
+# -----------------------------------------------------------------------------
+# Funções auxiliares
+# -----------------------------------------------------------------------------
 log_info() { echo -e "${AZUL}➜${SEM_COR} $1"; }
 log_ok()   { echo -e "${VERDE}✓${SEM_COR} $1"; }
 log_warn() { echo -e "${AMARELO}⚠${SEM_COR} $1"; }
 log_error(){ echo -e "${VERMELHO}✗${SEM_COR} $1"; exit 1; }
 
 if [ "$EUID" -ne 0 ]; then
-    log_error "Execute como root: sudo ./instalar_seederlinux.sh"
+    log_error "Execute como root: sudo ./install.sh"
 fi
 
-echo -e "${AZUL}========================================${SEM_COR}"
-echo -e "${AZUL}  SeederLinux Lite - Instalação         ${SEM_COR}"
-echo -e "${AZUL}========================================${SEM_COR}"
+echo -e "${AZUL}====================================================${SEM_COR}"
+echo -e "${AZUL}     SeederLinux Lite - Instalação Completa (SSL)   ${SEM_COR}"
+echo -e "${AZUL}====================================================${SEM_COR}"
 echo ""
 
 # -----------------------------------------------------------------------------
-# 1. Detectar sistema
+# Configurações (edite aqui se necessário)
 # -----------------------------------------------------------------------------
-log_info "[1/12] Detectando sistema operacional..."
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WEB_DIR="/var/www/html/seederlinux"   # Padrão Debian/Ubuntu
+
+DB_NAME="seederlinux"
+DB_USER="seeder"
+DB_PASS="seeder123"
+
+ADMIN_USER="admin"
+ADMIN_PASS="admin123"
+ADMIN_EMAIL="admin@seeder.local"
+
+DOMAIN="seederlinux.local"            # Domínio para o certificado SSL
+CERT_DIR="/etc/apache2/ssl"
+
+# -----------------------------------------------------------------------------
+# [1/8] Detectar sistema
+# -----------------------------------------------------------------------------
+log_info "[1/8] Detectando sistema operacional..."
 if [ -f /etc/os-release ]; then
     . /etc/os-release
     DISTRO=$ID
+    echo "   Distribuição: $NAME $VERSION"
 else
-    log_error "Não foi possível identificar a distribuição."
+    log_error "Sistema não suportado."
 fi
-echo "   Distribuição: $NAME $VERSION"
 
 # -----------------------------------------------------------------------------
-# 2. Configurações
+# [2/8] Instalar dependências
 # -----------------------------------------------------------------------------
-log_info "[2/12] Definindo configurações..."
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-WEB_DIR="/var/www/html/seederlinux"
+log_info "[2/8] Instalando dependências..."
+apt-get update -y
 
-DB_NAME="seederlinux"
-DB_USER="seederlinux"
-DB_PASS="seederlinux123"
+# Pacotes base
+BASE_PKGS="apache2 postgresql postgresql-contrib curl git unzip openssl jq rsync"
 
-ADMIN_EMAIL="admin@sistema.local"
-ADMIN_PASS="Admin@123"
-ADMIN_NAME="Administrador"
-
-echo "   Diretório do projeto: $SCRIPT_DIR"
-echo "   Diretório web: $WEB_DIR"
-echo "   Banco: $DB_NAME / Usuário: $DB_USER"
-
-# -----------------------------------------------------------------------------
-# 3. Instalar dependências
-# -----------------------------------------------------------------------------
-log_info "[3/12] Instalando dependências..."
-apt update -qq
-
-BASE_PKGS="apache2 postgresql postgresql-client curl git unzip openssl jq rsync"
-
+# Instalação específica por distribuição (garantindo PHP 8.1+)
 case $DISTRO in
     ubuntu|linuxmint|zorin|pop)
         if ! grep -q "ondrej/php" /etc/apt/sources.list /etc/apt/sources.list.d/* 2>/dev/null; then
-            apt install -y software-properties-common
+            apt-get install -y software-properties-common
             add-apt-repository -y ppa:ondrej/php
-            apt update -qq
+            apt-get update -y
         fi
-        apt install -y $BASE_PKGS \
-            libapache2-mod-php8.1 \
-            php8.1 php8.1-cli php8.1-common \
-            php8.1-pgsql php8.1-curl php8.1-mbstring \
-            php8.1-xml php8.1-json
+        apt-get install -y $BASE_PKGS \
+            libapache2-mod-php8.1 php8.1 php8.1-cli php8.1-common \
+            php8.1-pgsql php8.1-curl php8.1-mbstring php8.1-xml php8.1-json
         ;;
     debian)
         PHP_PACKAGES="php libapache2-mod-php"
@@ -86,102 +88,117 @@ case $DISTRO in
                 PHP_PACKAGES="$PHP_PACKAGES php-${ext}"
             fi
         done
-        apt install -y $BASE_PKGS $PHP_PACKAGES
+        apt-get install -y $BASE_PKGS $PHP_PACKAGES
         ;;
     *)
         log_error "Distribuição não suportada: $DISTRO"
         ;;
 esac
 
-a2enmod rewrite >/dev/null 2>&1 || true
-systemctl restart apache2
+# Habilitar módulos Apache
+a2enmod rewrite ssl headers >/dev/null 2>&1 || true
+systemctl restart apache2 || service apache2 restart
 log_ok "Dependências instaladas"
 
 # -----------------------------------------------------------------------------
-# 4. Iniciar PostgreSQL
+# [3/8] Configurar PostgreSQL
 # -----------------------------------------------------------------------------
-log_info "[4/12] Iniciando PostgreSQL..."
-systemctl start postgresql
-systemctl enable postgresql >/dev/null 2>&1
-sleep 2
-if ! systemctl is-active --quiet postgresql; then
-    log_error "PostgreSQL não iniciou."
-fi
-log_ok "PostgreSQL ativo"
+log_info "[3/8] Configurando PostgreSQL..."
+systemctl start postgresql || service postgresql start
+systemctl enable postgresql >/dev/null 2>&1 || update-rc.d postgresql enable
 
-# -----------------------------------------------------------------------------
-# 5. Criar usuário e banco
-# -----------------------------------------------------------------------------
-log_info "[5/12] Criando usuário e banco de dados..."
+# Criar usuário e banco
 if ! su - postgres -c "psql -tAc \"SELECT 1 FROM pg_roles WHERE rolname='$DB_USER'\"" 2>/dev/null | grep -q 1; then
     su - postgres -c "psql -c \"CREATE ROLE $DB_USER WITH LOGIN PASSWORD '$DB_PASS';\""
-    log_ok "Usuário $DB_USER criado"
-else
-    su - postgres -c "psql -c \"ALTER ROLE $DB_USER WITH PASSWORD '$DB_PASS';\""
-    log_ok "Senha do usuário $DB_USER atualizada"
 fi
 
 if ! su - postgres -c "psql -tAc \"SELECT 1 FROM pg_database WHERE datname='$DB_NAME'\"" 2>/dev/null | grep -q 1; then
     su - postgres -c "psql -c \"CREATE DATABASE $DB_NAME OWNER $DB_USER;\""
-    log_ok "Banco $DB_NAME criado"
-else
-    log_ok "Banco $DB_NAME já existe"
 fi
 
 su - postgres -c "psql -c \"GRANT ALL PRIVILEGES ON DATABASE $DB_NAME TO $DB_USER;\""
 su - postgres -c "psql -d $DB_NAME -c \"GRANT ALL ON SCHEMA public TO $DB_USER;\""
 su - postgres -c "psql -d $DB_NAME -c \"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO $DB_USER;\""
 
-# -----------------------------------------------------------------------------
-# 6. Configurar autenticação MD5
-# -----------------------------------------------------------------------------
-log_info "[6/12] Configurando autenticação MD5..."
+# Ajustar autenticação para md5
 PG_HBA=$(su - postgres -c "psql -tAc 'SHOW hba_file;'" 2>/dev/null | tr -d ' ')
-if [ -n "$PG_HBA" ] && [ -f "$PG_HBA" ]; then
-    cp "$PG_HBA" "${PG_HBA}.bak.$(date +%s)"
-    sed -i 's/^local\s\+all\s\+all\s\+peer/local   all             all                                     md5/' "$PG_HBA"
-    sed -i 's/^host\s\+all\s\+all\s\+127\.0\.0\.1\/32\s\+scram-sha-256/host    all             all             127.0.0.1\/32            md5/' "$PG_HBA"
-    sed -i 's/^host\s\+all\s\+all\s\+::1\/128\s\+scram-sha-256/host    all             all             ::1\/128                 md5/' "$PG_HBA"
-    systemctl restart postgresql
+if [ -f "$PG_HBA" ]; then
+    cp "$PG_HBA" "${PG_HBA}.bak"
+    sed -i 's/peer$/md5/' "$PG_HBA"
+    sed -i 's/scram-sha-256$/md5/' "$PG_HBA"
+    systemctl restart postgresql || service postgresql restart
     sleep 2
-    log_ok "Autenticação configurada para MD5"
-else
-    log_warn "pg_hba.conf não encontrado. Verifique manualmente."
 fi
 
-# -----------------------------------------------------------------------------
-# 7. Testar conexão
-# -----------------------------------------------------------------------------
-log_info "[7/12] Testando conexão com o banco..."
-if PGPASSWORD="$DB_PASS" psql -h localhost -U "$DB_USER" -d "$DB_NAME" -c "SELECT 1" >/dev/null 2>&1; then
-    log_ok "Conexão bem-sucedida"
-else
+# Testar conexão
+if ! PGPASSWORD="$DB_PASS" psql -h localhost -U "$DB_USER" -d "$DB_NAME" -c "SELECT 1" >/dev/null 2>&1; then
     log_error "Falha na conexão com o banco."
 fi
+log_ok "PostgreSQL configurado"
 
 # -----------------------------------------------------------------------------
-# 8. Copiar arquivos do projeto
+# [4/8] Aplicar schema.sql e criar tabela users (se necessário)
 # -----------------------------------------------------------------------------
-log_info "[8/12] Copiando arquivos do projeto..."
+log_info "[4/8] Aplicando estrutura do banco de dados..."
+if [ -f "$PROJECT_DIR/database/schema.sql" ]; then
+    PGPASSWORD="$DB_PASS" psql -h localhost -U "$DB_USER" -d "$DB_NAME" -f "$PROJECT_DIR/database/schema.sql" >/dev/null 2>&1
+    log_ok "Schema aplicado"
+else
+    log_warn "schema.sql não encontrado. Continuando..."
+fi
+
+# Garantir tabela users
+PGPASSWORD="$DB_PASS" psql -h localhost -U "$DB_USER" -d "$DB_NAME" <<SQLEOF 2>/dev/null
+CREATE TABLE IF NOT EXISTS users (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(100) NOT NULL,
+    email VARCHAR(100) UNIQUE NOT NULL,
+    password_hash VARCHAR(255) NOT NULL,
+    role VARCHAR(50) DEFAULT 'user',
+    active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+SQLEOF
+log_ok "Tabela users verificada/criada"
+
+# -----------------------------------------------------------------------------
+# [5/8] Importar scripts core para o banco
+# -----------------------------------------------------------------------------
+log_info "[5/8] Importando scripts core..."
+if [ -d "$PROJECT_DIR/scripts" ]; then
+    for script_file in "$PROJECT_DIR/scripts"/*.sh; do
+        if [ -f "$script_file" ]; then
+            script_name=$(basename "$script_file" .sh)
+            script_content=$(cat "$script_file" | sed "s/'/''/g")
+            PGPASSWORD="$DB_PASS" psql -h localhost -U "$DB_USER" -d "$DB_NAME" <<SQLEOF 2>/dev/null
+INSERT INTO scripts (name, content, is_core, version)
+VALUES ('$script_name', '$script_content', TRUE, 1)
+ON CONFLICT (name) DO UPDATE 
+SET content = '$script_content', version = version + 1;
+SQLEOF
+            log_ok "   Script $script_name importado"
+        fi
+    done
+else
+    log_warn "Diretório scripts/ não encontrado"
+fi
+
+# -----------------------------------------------------------------------------
+# [6/8] Copiar arquivos e criar config.php
+# -----------------------------------------------------------------------------
+log_info "[6/8] Instalando arquivos do sistema..."
 if [ -d "$WEB_DIR" ]; then
     log_warn "Diretório $WEB_DIR já existe. Será sobrescrito (exceto storage)."
     [ -d "$WEB_DIR/storage" ] && mv "$WEB_DIR/storage" /tmp/seeder_storage_backup
     rm -rf "$WEB_DIR"
 fi
+
 mkdir -p "$WEB_DIR"
-
-rsync -av --exclude='.git' --exclude='node_modules' --exclude='*.zip' \
-    --exclude='install.sh' --exclude='instalar_seederlinux.sh' \
-    "$SCRIPT_DIR/" "$WEB_DIR/" >/dev/null 2>&1
-
+rsync -av --exclude='.git' --exclude='install.sh' "$PROJECT_DIR/" "$WEB_DIR/" >/dev/null 2>&1
 [ -d "/tmp/seeder_storage_backup" ] && mv /tmp/seeder_storage_backup "$WEB_DIR/storage"
 mkdir -p "$WEB_DIR/storage"
-log_ok "Arquivos copiados para $WEB_DIR"
 
-# -----------------------------------------------------------------------------
-# 9. Criar config.php
-# -----------------------------------------------------------------------------
-log_info "[9/12] Criando configuração do banco..."
+# Criar config.php
 mkdir -p "$WEB_DIR/api"
 cat > "$WEB_DIR/api/config.php" <<PHPEOF
 <?php
@@ -207,87 +224,41 @@ function getDBConnection() {
     }
 }
 PHPEOF
-log_ok "config.php criado"
 
-# -----------------------------------------------------------------------------
-# 10. Executar schema.sql e criar tabela users (se não existir)
-# -----------------------------------------------------------------------------
-log_info "[10/12] Executando schema e criando tabelas..."
-
-# Aplica o schema principal
-if [ -f "$WEB_DIR/database/schema.sql" ]; then
-    PGPASSWORD="$DB_PASS" psql -h localhost -U "$DB_USER" -d "$DB_NAME" -f "$WEB_DIR/database/schema.sql" >/dev/null 2>&1
-    log_ok "Schema aplicado"
-else
-    log_warn "schema.sql não encontrado em $WEB_DIR/database/"
-fi
-
-# Cria a tabela users se não existir
-log_info "   Verificando/criando tabela users..."
-PGPASSWORD="$DB_PASS" psql -h localhost -U "$DB_USER" -d "$DB_NAME" <<SQLEOF 2>/dev/null
-CREATE TABLE IF NOT EXISTS users (
-    id SERIAL PRIMARY KEY,
-    name VARCHAR(100) NOT NULL,
-    email VARCHAR(100) UNIQUE NOT NULL,
-    password_hash VARCHAR(255) NOT NULL,
-    role VARCHAR(50) DEFAULT 'user',
-    active BOOLEAN DEFAULT TRUE,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-SQLEOF
-log_ok "Tabela users verificada/criada"
-
-# -----------------------------------------------------------------------------
-# 11. Importar scripts core para o banco
-# -----------------------------------------------------------------------------
-log_info "[11/12] Importando scripts core para o banco..."
-
-if [ -d "$WEB_DIR/scripts" ]; then
-    for script_file in "$WEB_DIR/scripts"/*.sh; do
-        if [ -f "$script_file" ]; then
-            script_name=$(basename "$script_file" .sh)
-            script_content=$(cat "$script_file" | sed "s/'/''/g")  # escapa aspas simples
-            PGPASSWORD="$DB_PASS" psql -h localhost -U "$DB_USER" -d "$DB_NAME" <<SQLEOF 2>/dev/null
-INSERT INTO scripts (name, content, is_core, version)
-VALUES ('$script_name', '$script_content', TRUE, 1)
-ON CONFLICT (name) DO UPDATE 
-SET content = '$script_content', version = version + 1;
-SQLEOF
-            log_ok "   Script $script_name importado"
-        fi
-    done
-else
-    log_warn "Diretório scripts/ não encontrado em $WEB_DIR"
-fi
-
-# -----------------------------------------------------------------------------
-# 12. Criar usuário administrador
-# -----------------------------------------------------------------------------
-log_info "[12/12] Criando usuário administrador..."
-
+# Criar usuário administrador
 HASH=$(php -r "echo password_hash('$ADMIN_PASS', PASSWORD_BCRYPT);")
-
 PGPASSWORD="$DB_PASS" psql -h localhost -U "$DB_USER" -d "$DB_NAME" <<SQLEOF 2>/dev/null
 INSERT INTO users (name, email, password_hash, role, active, created_at)
-VALUES ('$ADMIN_NAME', '$ADMIN_EMAIL', '$HASH', 'admin_gap', TRUE, NOW())
+VALUES ('$ADMIN_USER', '$ADMIN_EMAIL', '$HASH', 'admin_gap', TRUE, NOW())
 ON CONFLICT (email) 
 DO UPDATE SET password_hash = '$HASH', role = 'admin_gap', active = TRUE;
 SQLEOF
 
-if [ $? -eq 0 ]; then
-    log_ok "Administrador criado/atualizado: $ADMIN_EMAIL"
-else
-    log_warn "Falha ao criar administrador. Verifique a tabela users."
-fi
+log_ok "Arquivos instalados e admin criado"
 
 # -----------------------------------------------------------------------------
-# 13. Configurar Apache
+# [7/8] Gerar certificado SSL e configurar Apache com HTTPS
 # -----------------------------------------------------------------------------
-log_info "Configurando Apache..."
+log_info "[7/8] Configurando Apache com HTTPS..."
+mkdir -p "$CERT_DIR"
+openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+    -keyout "$CERT_DIR/seederlinux.key" \
+    -out "$CERT_DIR/seederlinux.crt" \
+    -subj "/C=BR/ST=PA/L=Belem/O=SeederLinux/OU=TI/CN=$DOMAIN" 2>/dev/null
+
 cat > /etc/apache2/sites-available/seederlinux.conf <<APACHEEOF
 <VirtualHost *:80>
-    ServerAdmin admin@localhost
+    ServerName $DOMAIN
+    Redirect permanent / https://$DOMAIN/
+</VirtualHost>
+
+<VirtualHost *:443>
+    ServerName $DOMAIN
     DocumentRoot $WEB_DIR
+
+    SSLEngine on
+    SSLCertificateFile $CERT_DIR/seederlinux.crt
+    SSLCertificateKeyFile $CERT_DIR/seederlinux.key
 
     <Directory $WEB_DIR>
         Options Indexes FollowSymLinks
@@ -302,8 +273,8 @@ cat > /etc/apache2/sites-available/seederlinux.conf <<APACHEEOF
         Require all granted
     </Directory>
 
-    ErrorLog \${APACHE_LOG_DIR}/seederlinux_error.log
-    CustomLog \${APACHE_LOG_DIR}/seederlinux_access.log combined
+    ErrorLog \${APACHE_LOG_DIR}/seeder_error.log
+    CustomLog \${APACHE_LOG_DIR}/seeder_access.log combined
 </VirtualHost>
 APACHEEOF
 
@@ -312,35 +283,46 @@ a2ensite seederlinux.conf >/dev/null 2>&1
 chown -R www-data:www-data "$WEB_DIR"
 chmod -R 755 "$WEB_DIR"
 chmod -R 775 "$WEB_DIR/storage"
-systemctl restart apache2
-log_ok "Apache configurado"
+
+systemctl restart apache2 || service apache2 restart
+log_ok "Apache configurado com HTTPS (certificado autoassinado)"
 
 # -----------------------------------------------------------------------------
-# Verificação final
+# [8/8] Verificação final
 # -----------------------------------------------------------------------------
-log_info "Verificando instalação..."
+log_info "[8/8] Verificando instalação..."
 sleep 2
-API_RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost/api/organizations 2>/dev/null || echo "000")
+API_RESPONSE=$(curl -s -k -o /dev/null -w "%{http_code}" https://localhost/api/organizations 2>/dev/null || echo "000")
 if [ "$API_RESPONSE" = "200" ] || [ "$API_RESPONSE" = "401" ] || [ "$API_RESPONSE" = "405" ]; then
-    log_ok "API respondeu (HTTP $API_RESPONSE)"
+    log_ok "API respondeu (HTTPS) - HTTP $API_RESPONSE"
 else
     log_warn "API não respondeu como esperado. Código: $API_RESPONSE"
 fi
 
-# Resumo
+# -----------------------------------------------------------------------------
+# Resumo final
+# -----------------------------------------------------------------------------
 IP=$(hostname -I | awk '{print $1}')
+
 echo ""
-echo -e "${VERDE}========================================${SEM_COR}"
-echo -e "${VERDE}  ✅ INSTALAÇÃO CONCLUÍDA!               ${SEM_COR}"
-echo -e "${VERDE}========================================${SEM_COR}"
+echo -e "${VERDE}====================================================${SEM_COR}"
+echo -e "${VERDE}       Instalação Concluída com Sucesso!            ${SEM_COR}"
+echo -e "${VERDE}====================================================${SEM_COR}"
 echo ""
-echo -e "🌐 Página pública:  ${AZUL}http://$IP/${SEM_COR}"
-echo -e "🔐 Painel admin:    ${AZUL}http://$IP/painel/${SEM_COR}"
-echo -e "🔌 API:             ${AZUL}http://$IP/api/${SEM_COR}"
+echo -e "🌐 URL do sistema:  ${AZUL}https://$DOMAIN/${SEM_COR}  (ou https://$IP/)"
+echo -e "🔐 Painel admin:    ${AZUL}https://$DOMAIN/painel/${SEM_COR}"
+echo -e "🔌 API:             ${AZUL}https://$DOMAIN/api/${SEM_COR}"
 echo -e "🗄️  Banco:          ${AZUL}$DB_NAME (usuário: $DB_USER / senha: $DB_PASS)${SEM_COR}"
 echo -e "👨‍💼 Administrador:   ${AZUL}$ADMIN_EMAIL / $ADMIN_PASS${SEM_COR}"
 echo ""
-echo -e "${AMARELO}⚠️  Altere as senhas padrão em produção!${SEM_COR}"
+echo -e "${AMARELO}⚠️  ATENÇÃO:${SEM_COR} O certificado SSL é autoassinado."
+echo "   Seu navegador mostrará um aviso de segurança."
+echo "   Clique em 'Avançado' e 'Prosseguir' para acessar."
+echo ""
+echo -e "${AMARELO}💡 Dica:${SEM_COR} Para usar o domínio $DOMAIN, adicione ao /etc/hosts:"
+echo "   echo '$IP $DOMAIN' | sudo tee -a /etc/hosts"
+echo ""
+echo -e "${AMARELO}🔑 Importante:${SEM_COR} Altere as senhas padrão em produção!"
 echo -e "📁 Arquivos em:     $WEB_DIR"
 echo ""
 
